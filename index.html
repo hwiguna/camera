@@ -52,7 +52,8 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hid
 #modes span{padding:6px 12px;border-radius:16px}
 #modes span.on{background:#3c4043;color:#fff;font-weight:500}
 #row{display:flex;align-items:center;justify-content:space-between;padding:0 34px}
-#thumb{width:52px;height:52px;border-radius:50%;border:2px solid rgba(255,255,255,.85);background:#202124 center/cover no-repeat;position:relative;padding:0}
+#thumb{width:52px;height:52px;border-radius:50%;border:2px solid rgba(255,255,255,.85);background:#202124 center/cover no-repeat;position:relative;padding:0;
+  -webkit-touch-callout:none;touch-action:none}
 #thumb.busy::after{content:"";position:absolute;inset:-6px;border-radius:50%;border:3px solid transparent;border-top-color:#fff;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 #shutter{width:78px;height:78px;border-radius:50%;border:4px solid rgba(255,255,255,.9);background:transparent;padding:4px;display:grid;place-items:center}
@@ -62,7 +63,13 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hid
 #flip{width:52px;height:52px;border-radius:50%;border:0;background:#3c4043;color:#fff;display:grid;place-items:center;padding:0}
 #flip svg{width:28px;height:28px;fill:#fff;transition:transform .4s}
 
-/* result sheet (temporary: shows the leftmost 4 cards) */
+/* Android-style toast ("Saved PXL_…jpg") — carries the trick number */
+#toast{position:absolute;left:50%;bottom:74px;transform:translate(-50%,8px);z-index:9;max-width:88vw;
+  padding:10px 16px;border-radius:20px;background:rgba(48,48,48,.92);color:#e8eaed;font:400 13.5px/1.3 inherit;
+  white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .25s,transform .25s}
+#toast.show{opacity:1;transform:translate(-50%,0)}
+
+/* hidden check sheet (long-press thumbnail): the cards that were read */
 #sheet{position:fixed;left:0;right:0;bottom:0;z-index:10;background:rgba(18,18,18,.97);border-radius:22px 22px 0 0;
   padding:14px 16px calc(var(--safe-b) + 22px);transform:translateY(105%);transition:transform .25s ease}
 #sheet.open{transform:none}
@@ -102,6 +109,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hid
       </div>
     </div>
 
+    <div id="toast" role="status"></div>
     <div id="zoom" role="group" aria-label="Zoom">
       <button>.5</button><button class="on">1x</button><button>2</button><button>5</button>
     </div>
@@ -133,14 +141,17 @@ const $ = id => document.getElementById(id);
 const video = $("video"), vf = $("vf");
 const LEFTMOST = 4;
 let feed = null;          // "camera" | "image" | null
-let testImg = null, track = null, lastResult = null;
+let testImg = null, testBmp = null, track = null, lastResult = null;
 
 /* ---------- camera ---------- */
 async function startCamera(){
   const test = new URLSearchParams(location.search).get("test");   // dev: ?test=<image url> fakes the camera
   if (test) {
-    testImg = new Image(); testImg.className = "feed"; testImg.src = test;
-    await testImg.decode(); video.replaceWith(testImg); feed = "image"; return;
+    // decode via createImageBitmap (works even in a background tab); the <img> is only for display
+    const blob = await (await fetch(test)).blob();
+    testBmp = await createImageBitmap(blob, { imageOrientation: "from-image" });
+    testImg = new Image(); testImg.className = "feed"; testImg.src = URL.createObjectURL(blob);
+    video.replaceWith(testImg); feed = "image"; return;
   }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -164,7 +175,7 @@ async function startCamera(){
 async function grabStill(){
   const MAX = 4000;
   let bmp = null;
-  if (feed === "image") bmp = testImg;
+  if (feed === "image") bmp = testBmp;
   else if (feed === "camera") {
     if ("ImageCapture" in window && track) {
       try {
@@ -194,11 +205,38 @@ async function shoot(fromCanvas){
     $("thumb").classList.add("busy");
     await new Promise(r => setTimeout(r, 30));            // let the UI paint before heavy work
     lastResult = await readSpread(canvas, { leftmost: LEFTMOST });
-    lastResult.size = `${canvas.width}×${canvas.height}`;   // shown so we can tell if the phone gave a low-res capture
-    showResult(lastResult);
+    lastResult.size = `${canvas.width}×${canvas.height}`;   // shown in the hidden sheet: tells us if the phone gave a low-res capture
+    lastResult.X = trickNumber(lastResult);
+    showSaved(lastResult.X);
   } catch (e) {
-    console.error(e); lastResult = null; showError(e);
+    console.error(e); lastResult = { error: String(e.message || e), leftmost: [], cards: [] }; showSaved(null);
   } finally { $("thumb").classList.remove("busy"); busy = false; }
+}
+
+/* ---------- the trick ----------
+   X = 52 − (sum of the values of the four leftmost cards), A=1 … J=11, Q=12, K=13. Suits don't matter.
+   Only when all four ranks are read confidently; otherwise null → "retake" tell. */
+function trickNumber(r){
+  const four = [1, 2, 3, 4].map(i => r.leftmost.find(c => c.pos === i));
+  if (four.some(c => !c || c.rank === "?" || !c.rankSure || !c.value)) return null;
+  return 52 - four.reduce((s, c) => s + c.value, 0);
+}
+/* Disguise: a Pixel-style "Saved" toast. Real Pixel names are PXL_YYYYMMDD_HHMMSSmmm.jpg; the last two
+   "millisecond" digits carry X. Retake tell: the motion-photo suffix ".MP.jpg" (a real Pixel name). */
+function pixelName(X){
+  const d = new Date(), p = (n, w = 2) => String(n).padStart(w, "0");
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const lead = Math.floor(Math.random() * 10);
+  return X == null
+    ? `PXL_${stamp}${lead}${p(Math.floor(Math.random() * 100))}.MP.jpg`
+    : `PXL_${stamp}${lead}${p(X)}.jpg`;
+}
+let toastTimer = null;
+function showSaved(X){
+  const t = $("toast");
+  t.textContent = `Saved ${pixelName(X)}`;
+  t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 3200);
 }
 function thumbOf(c){
   const t = document.createElement("canvas"), k = 120 / Math.min(c.width, c.height);
@@ -214,8 +252,9 @@ $("pick").onchange = async e => {
   e.target.value = ""; shoot(c);
 };
 
-/* ---------- result (temporary display) ---------- */
+/* ---------- hidden check sheet (long-press the thumbnail): what was read, for practising/debugging ---------- */
 function showResult(r){
+  if (r.error) { showError(r.error); return; }
   const box = $("cards"); box.innerHTML = "";
   const values = [];
   for (let i = 1; i <= LEFTMOST; i++) {
@@ -239,7 +278,7 @@ function showResult(r){
     }
     box.appendChild(el);
   }
-  $("sheetTitle").textContent = "Leftmost 4 cards";
+  $("sheetTitle").textContent = r.X == null ? "Leftmost 4 — retake (.MP)" : `Leftmost 4 — X = ${r.X}`;
   $("meta").textContent = `values ${values.join(" · ")}  ·  ${r.cards.length} cards found · ${r.size || ""} · ${(r.ms / 1000).toFixed(1)} s · tap to close`;
   $("sheet").classList.add("open");
 }
@@ -248,7 +287,11 @@ function showError(e){
   $("meta").textContent = String(e.message || e) + " · tap to close"; $("sheet").classList.add("open");
 }
 $("sheet").onclick = () => $("sheet").classList.remove("open");
-$("thumb").onclick = () => lastResult && showResult(lastResult);
+// a normal tap on the thumbnail does nothing visible; a long-press (0.6 s) opens the check sheet
+let pressTimer = null;
+$("thumb").addEventListener("pointerdown", () => { pressTimer = setTimeout(() => lastResult && showResult(lastResult), 600); });
+for (const ev of ["pointerup", "pointerleave", "pointercancel"]) $("thumb").addEventListener(ev, () => clearTimeout(pressTimer));
+$("thumb").addEventListener("contextmenu", e => e.preventDefault());
 
 /* ---------- decorative controls (look & feel only) ---------- */
 vf.addEventListener("click", e => {

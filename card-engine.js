@@ -372,6 +372,14 @@ function analyze(srcCanvas, maxSide){
     const endCard = i < 2 || i > idx.length - 3;
     return Math.abs(p.n - pred) < hm * (endCard ? 2.2 : (window.__lineTol ?? 1.2)) * Math.sqrt(1 + b * b);
   });
+  // A detection much bigger than its NEIGHBOURS along the spread is a pair of centre pips
+  // (e.g. on the wide first card), not an index. Compared locally, so bigger heart pips elsewhere don't matter.
+  const pairSize = p => Math.hypot(Math.max(p.S.x1, ...p.parts.map(o => o.x1)) - Math.min(p.S.x0, ...p.parts.map(o => o.x0)),
+                                   Math.max(p.S.y1, ...p.parts.map(o => o.y1)) - Math.min(p.S.y0, ...p.parts.map(o => o.y0)));
+  idx = idx.filter((p, i) => {
+    const nb = idx.slice(Math.max(0, i - 3), i + 4).filter(q => q !== p).map(pairSize);
+    return nb.length < 3 || pairSize(p) < med(nb) * 1.4;
+  });
   debug.kept = idx.length;
   if (!window.__noBlackCluster) clusterSuits(idx.filter(p => p.R.col === 1), ["C", "S"]);
   clusterSuits(idx.filter(p => p.R.col === 2), ["H", "D"]);
@@ -607,7 +615,10 @@ async function ocrPass(res, canvas = src){
       const t = reads[i].t;
       const cf = Math.min(1, reads[i].cf / 100), sc = c._suitConf || .7;
       if (t === c.rank) { c.conf = Math.min(.98, .5 + .5 * Math.max(cf, .8)) * (.6 + .4 * sc); c.rankConf = Math.max(c.rankConf || 0, .9 + .08 * cf); c.why += " · OCR agrees"; }
-      else if (cf > .55) { c.alts = [c.rank + c.suit, ...c.alts]; c.rank = t; c.conf = (.45 + .45 * cf) * (.6 + .4 * sc); c.rankConf = .5 + .4 * cf; c.why += ` · OCR says ${t}`; }
+      // OCR overrides the shape match only when it's backed by ≥2 of the 3 read sizes (or very sure);
+      // a lone disagreeing read (a 5 read as 9) makes the rank UNSURE instead of silently wrong
+      else if (cf > .55 && (reads[i].n >= 2 || cf > .85)) { c.alts = [c.rank + c.suit, ...c.alts]; c.rank = t; c.conf = (.45 + .45 * cf) * (.6 + .4 * sc); c.rankConf = .5 + .4 * cf; c.why += ` · OCR says ${t}`; }
+      else if (cf > .55) { c.rankConf = Math.min(c.rankConf ?? .5, .45); c.why += ` · OCR unsure (${t}?)`; }
       else return;
       c.altList = [c.rank + c.suit, ...c.alts.filter(a => a !== c.rank + c.suit)];
       c.label = labelOf(c.conf);
