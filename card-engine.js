@@ -367,10 +367,13 @@ function analyze(srcCanvas, maxSide){
     const mt = nb.reduce((a, q) => a + q.t, 0) / nb.length, mn = nb.reduce((a, q) => a + q.n, 0) / nb.length;
     let stt = 0, stn = 0; for (const q of nb) { stt += (q.t - mt) ** 2; stn += (q.t - mt) * (q.n - mn); }
     const b = stt ? stn / stt : 0, pred = mn + b * (p.t - mt);
-    return Math.abs(p.n - pred) < hm * 2.2 * Math.sqrt(1 + b * b);
+    // tight inside the spread (stray pip pairs sit well off the index curve); loose at the two ends,
+    // where the fit only has neighbours on one side and a real end card can sit off the extrapolated line
+    const endCard = i < 2 || i > idx.length - 3;
+    return Math.abs(p.n - pred) < hm * (endCard ? 2.2 : (window.__lineTol ?? 1.2)) * Math.sqrt(1 + b * b);
   });
   debug.kept = idx.length;
-  clusterSuits(idx.filter(p => p.R.col === 1), ["C", "S"]);
+  if (!window.__noBlackCluster) clusterSuits(idx.filter(p => p.R.col === 1), ["C", "S"]);
   clusterSuits(idx.filter(p => p.R.col === 2), ["H", "D"]);
 
   // card records
@@ -444,7 +447,9 @@ function analyze(srcCanvas, maxSide){
         // Only add hidden cards for card edges actually seen in the gap (one per edge).
         const edges = edgesBetween(cards[i], cards[i + 1]);
         // undecided scan: a truly missing card leaves a ~2× gap, so don't invent one for a 1.6–1.8× gap
-        const n = edges < 0 ? (gaps[i] / mg >= 1.85 ? Math.round(gaps[i] / mg) - 1 : 0) : Math.min(edges, Math.round(gaps[i] / mg));
+        let n = edges < 0 ? (gaps[i] / mg >= 1.85 ? Math.round(gaps[i] / mg) - 1 : 0) : Math.min(edges, Math.round(gaps[i] / mg));
+        // the first card's strip is normally extra wide (big pips, wide margin): demand a clearly bigger gap there
+        if (i === 0 && gaps[i] / mg < 2.2) n = 0;
         (debug.gaps ||= []).push(`${i + 1}|${i + 2}: x${(gaps[i] / mg).toFixed(1)} edges ${edges} → ${n}`);
         for (let k = 1; k <= n; k++) {
           const t = k / (n + 1), x = pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, y = pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t;
@@ -520,7 +525,12 @@ function clusterSuits(all, [a, b]){
     const d0 = dist(p.sgrid, cents[0]), d1 = dist(p.sgrid, cents[1]);
     const mine = d0 <= d1 ? 0 : 1, other = 1 - mine, dm = mine ? d1 : d0, dO = mine ? d0 : d1;
     const conf = .5 + .5 * Math.min(1, (dO - dm) / (dO + dm + 1e-6) * 3) * (.5 + .5 * sep);
-    p.ss = [[names[mine], conf], [names[other], 1 - conf]];
+    const own = p.ss[0];   // what the pip's own shape says
+    if (own[0] !== names[mine]) {
+      // group and shape disagree: keep whichever is surer, but flag the suit as unsure (shows "suit ?")
+      const pick = own[1] >= conf ? own[0] : names[mine];
+      p.ss = [[pick, .55], [pick === a ? b : a, .45]];
+    } else p.ss = [[names[mine], Math.max(conf, own[1])], [names[other], 1 - Math.max(conf, own[1])]];
   });
 }
 
@@ -539,11 +549,11 @@ function suitByShape(grid, isRed){
     const pH = sq(zh);
     return [["H", .5 + pH / 2], ["D", 1 - pH / 2]].sort((a, b) => b[1] - a[1]);
   }
-  // club: width profile dips between top lobe and side lobes ; spade widens smoothly to its shoulders
-  let dip = 0;
-  for (let y = 3; y < Math.round(GH * .7); y++) dip = Math.max(dip, Math.max(...wid.slice(0, y)) - wid[y]);
-  const topW = mean(wid.slice(1, 5)) / GW;   // club's round top lobe is wider than spade's point
-  const zc = (dip - 1.5) * 1.2 + (topW - .3) * 8;
+  // club: round top lobe keeps the same width for a while (rows ~3→6 grow ≈1.0×) before the side lobes;
+  // spade: widens steadily from its point (≈1.6–1.8×). Measured on real Bicycle pips (test-photos/batch3).
+  const grow = mean(wid.slice(5, 8)) / Math.max(1, mean(wid.slice(2, 5)));
+  const apex = wid[2] / Math.max(1, ...wid.slice(0, 16));        // club ≥ .38, spade ≤ .31
+  const zc = (1.35 - grow) * 7 + (apex - .345) * 12;
   const pC = sq(zc);
   return [["C", .5 + pC / 2], ["S", 1 - pC / 2]].sort((a, b) => b[1] - a[1]);
 }
@@ -562,30 +572,39 @@ async function ocrPass(res, canvas = src){
       await tessWorker.setParameters({ tessedit_char_whitelist: "A234567891OJQK0", tessedit_pageseg_mode: "6" });
     }
     setStatus(`Reading ${list.length} ranks with OCR…`);
-    const LH = 110, GH0 = 64, cv = document.createElement("canvas");
-    cv.width = 260; cv.height = LH * list.length + 40;
-    const g = cv.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, cv.width, cv.height);
-    list.forEach((c, i) => {
-      const r = c._rank, k = GH0 / r.h, bw = (r.w + r.h * .2) * k, bh = r.h * 1.25 * k;
-      g.save(); g.translate(60, 20 + i * LH + LH / 2);
-      g.beginPath(); g.rect(-bw / 2, -bh / 2, bw, bh); g.clip();
-      g.fillStyle = "#fff"; g.fillRect(-bw / 2, -bh / 2, bw, bh);
-      g.filter = "grayscale(1) contrast(1.6)"; g.scale(k, k); g.rotate(r.phi); g.drawImage(canvas, -r.cx, -r.cy);
-      g.restore();
-    });
-    const { data } = await tessWorker.recognize(cv);
-    const reads = new Array(list.length).fill(null);
-    const words = data.words || (data.lines || []).flatMap(l => l.words || []);
-    for (const w of words) {
-      const i = Math.floor(((w.bbox.y0 + w.bbox.y1) / 2 - 20) / LH);
-      if (i >= 0 && i < list.length) reads[i] = { t: (reads[i] ? reads[i].t : "") + w.text, cf: w.confidence };
+    // OCR is sensitive to the exact glyph size (a Bicycle Q read fine at one size and as "9" at another),
+    // so every rank is read at three sizes and the readings vote.
+    const norm = t => { t = (t || "").trim().toUpperCase().replace(/O/g, "0").replace(/\s/g, "");
+      return t === "1" || t === "0" || t === "I0" || t === "L0" || t === "100" ? "10" : t; };
+    const votes = list.map(() => ({}));
+    for (const GH0 of [40, 64, 96]) {
+      const LH = Math.round(GH0 * 1.75), cv = document.createElement("canvas");
+      cv.width = Math.round(GH0 * 4); cv.height = LH * list.length + 40;
+      const g = cv.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, cv.width, cv.height);
+      list.forEach((c, i) => {
+        const r = c._rank, k = GH0 / r.h, bw = (r.w + r.h * .2) * k, bh = r.h * 1.25 * k;
+        g.save(); g.translate(GH0, 20 + i * LH + LH / 2);
+        g.beginPath(); g.rect(-bw / 2, -bh / 2, bw, bh); g.clip();
+        g.fillStyle = "#fff"; g.fillRect(-bw / 2, -bh / 2, bw, bh);
+        g.filter = "grayscale(1) contrast(1.6)"; g.scale(k, k); g.rotate(r.phi); g.drawImage(canvas, -r.cx, -r.cy);
+        g.restore();
+      });
+      const { data } = await tessWorker.recognize(cv);
+      const got = new Array(list.length).fill(null);
+      for (const w of data.words || (data.lines || []).flatMap(l => l.words || [])) {
+        const i = Math.floor(((w.bbox.y0 + w.bbox.y1) / 2 - 20) / LH);
+        if (i >= 0 && i < list.length) got[i] = { t: (got[i] ? got[i].t : "") + w.text, cf: w.confidence };
+      }
+      got.forEach((r, i) => { if (!r) return; const t = norm(r.t); if (!RANKS.includes(t)) return;
+        const v = votes[i][t] ||= { n: 0, sum: 0, max: 0 }; v.n++; v.sum += r.cf; v.max = Math.max(v.max, r.cf); });
     }
-    if (window.__csrDebug) { window.__ocrReads = reads; window.__ocrCanvas = cv; window.__ocrList = list; }
+    // winner = most total confidence; agreement across sizes raises confidence
+    const reads = votes.map(v => { const e = Object.entries(v).sort((a, b) => b[1].sum - a[1].sum)[0];
+      return e ? { t: e[0], cf: Math.min(99, e[1].max + 15 * (e[1].n - 1)), n: e[1].n } : null; });
+    if (window.__csrDebug) { window.__ocrReads = reads; window.__ocrVotes = votes; window.__ocrList = list; }
     list.forEach((c, i) => {
       if (!reads[i]) return;
-      let t = reads[i].t.trim().toUpperCase().replace(/O/g, "0").replace(/\s/g, "");
-      if (t === "1" || t === "0" || t === "I0" || t === "L0" || t === "100") t = "10";
-      if (!RANKS.includes(t)) return;
+      const t = reads[i].t;
       const cf = Math.min(1, reads[i].cf / 100), sc = c._suitConf || .7;
       if (t === c.rank) { c.conf = Math.min(.98, .5 + .5 * Math.max(cf, .8)) * (.6 + .4 * sc); c.rankConf = Math.max(c.rankConf || 0, .9 + .08 * cf); c.why += " · OCR agrees"; }
       else if (cf > .55) { c.alts = [c.rank + c.suit, ...c.alts]; c.rank = t; c.conf = (.45 + .45 * cf) * (.6 + .4 * sc); c.rankConf = .5 + .4 * cf; c.why += ` · OCR says ${t}`; }
