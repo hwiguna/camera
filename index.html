@@ -75,8 +75,10 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hid
 .pc .r{font:700 26px/1 Georgia,"Times New Roman",serif}
 .pc .s{font-size:28px;line-height:1.1}
 .pc .n{position:absolute;top:5px;left:7px;font:600 11px/1 inherit;color:#888}
-.pc.unsure::after{content:"?";position:absolute;top:4px;right:6px;font:700 13px/1 inherit;color:#e37400}
+.pc .v{font:600 15px/1.2 inherit;color:#5f6368;margin-top:4px}
+.pc.nosuit::after{content:"suit ?";position:absolute;bottom:5px;font:600 9px/1 inherit;color:#e37400;letter-spacing:.3px}
 .pc.unknown{background:#3c4043;color:#9aa0a6}
+.pc.unknown.red{box-shadow:inset 0 0 0 2px rgba(200,32,42,.6),0 2px 8px rgba(0,0,0,.5)}
 #sheet .meta{margin-top:12px;text-align:center;font-size:12px;color:#9aa0a6}
 </style>
 </head>
@@ -192,6 +194,7 @@ async function shoot(fromCanvas){
     $("thumb").classList.add("busy");
     await new Promise(r => setTimeout(r, 30));            // let the UI paint before heavy work
     lastResult = await readSpread(canvas, { leftmost: LEFTMOST });
+    lastResult.size = `${canvas.width}×${canvas.height}`;   // shown so we can tell if the phone gave a low-res capture
     showResult(lastResult);
   } catch (e) {
     console.error(e); lastResult = null; showError(e);
@@ -214,19 +217,30 @@ $("pick").onchange = async e => {
 /* ---------- result (temporary display) ---------- */
 function showResult(r){
   const box = $("cards"); box.innerHTML = "";
+  const values = [];
   for (let i = 1; i <= LEFTMOST; i++) {
     const c = r.leftmost.find(x => x.pos === i);
     const el = document.createElement("div");
-    if (!c || c.card === "?") { el.className = "pc unknown"; el.innerHTML = `<span class="n">${i}</span><span class="r">?</span>`; }
-    else {
-      el.className = "pc" + (c.color === "red" ? " red" : "") + (c.label === "high" ? "" : " unsure");
+    if (!c || c.rank === "?" || !c.rankSure) {
+      // a card is there but its rank couldn't be read
+      el.className = "pc unknown" + (c && c.color === "red" ? " red" : "");
+      el.innerHTML = `<span class="n">${i}</span><span class="r">?</span>`;
+      values.push("?");
+    } else if (!c.suitSure || c.suit === "?") {
+      // rank is good, suit is not: show the value (A=1 … K=13) rather than guess the suit
+      el.className = "pc nosuit" + (c.color === "red" ? " red" : "");
+      el.innerHTML = `<span class="n">${i}</span><span class="r">${c.rank}</span><span class="v">${c.value}</span>`;
+      el.title = `suit unsure${c.color ? " (" + c.color + ")" : ""}`;
+      values.push(c.value);
+    } else {
+      el.className = "pc" + (c.color === "red" ? " red" : "");
       el.innerHTML = `<span class="n">${i}</span><span class="r">${c.rank}</span><span class="s">${SUIT_SYM[c.suit]}</span>`;
-      el.title = `${c.label}${c.alts.length ? " · or " + c.alts.slice(0, 3).join(", ") : ""}`;
+      values.push(c.value);
     }
     box.appendChild(el);
   }
   $("sheetTitle").textContent = "Leftmost 4 cards";
-  $("meta").textContent = `${r.cards.length} cards found · ${(r.ms / 1000).toFixed(1)} s · tap to close`;
+  $("meta").textContent = `values ${values.join(" · ")}  ·  ${r.cards.length} cards found · ${r.size || ""} · ${(r.ms / 1000).toFixed(1)} s · tap to close`;
   $("sheet").classList.add("open");
 }
 function showError(e){

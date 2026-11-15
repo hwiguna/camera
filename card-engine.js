@@ -118,16 +118,52 @@ function analyze(srcCanvas, maxSide){
   let acc = 0, p90 = 255; for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= N * .9) { p90 = v; break; } }
   const whiteT = p90 * .78, blackT = p90 * .5;
 
+  // local brightness (box mean) so pale, glare-washed digits still count as ink while the faint grey
+  // shadow lines of tightly overlapped card edges don't (they'd glue neighbouring indices together)
+  const lumA = new Float32Array(N);
+  for (let i = 0; i < N; i++) { const p = i * 4; lumA[i] = (d[p + 1] + d[p + 2]) / 2; }
+  const LI = new Float64Array((W + 1) * (H + 1));
+  for (let y = 0; y < H; y++) { let row = 0; for (let x = 0; x < W; x++) { row += lumA[y * W + x]; LI[(y + 1) * (W + 1) + x + 1] = LI[y * (W + 1) + x + 1] + row; } }
+  const RAD = Math.max(8, Math.round(Math.min(W, H) / 45));
+  const localMean = (x, y) => { const x0 = Math.max(0, x - RAD), y0 = Math.max(0, y - RAD), x1 = Math.min(W, x + RAD + 1), y1 = Math.min(H, y + RAD + 1);
+    return (LI[y1 * (W + 1) + x1] - LI[y0 * (W + 1) + x1] - LI[y1 * (W + 1) + x0] + LI[y0 * (W + 1) + x0]) / ((x1 - x0) * (y1 - y0)); };
+
   // 0 = other, 1 = black ink, 2 = red ink ; white mask separately
   const ink = new Uint8Array(N), white = new Uint8Array(N);
   for (let i = 0; i < N; i++) {
     const p = i * 4, r = d[p], gg = d[p + 1], b = d[p + 2];
     const mx = Math.max(r, gg, b), mn = Math.min(r, gg, b);
     const redness = r - Math.max(gg, b);
-    if (mx >= whiteT && mx - mn < 60) white[i] = 1;
-    else if (redness > 40 && r > 90) ink[i] = 2;                       // clearly red
-    else if ((gg + b) / 2 < p90 * .72) ink[i] = redness > 22 ? 2 : 1;  // darker than card stock
+    if (mx >= whiteT && mx - mn < 60) { white[i] = 1; continue; }
+    if (redness > 40 && r > 90) { ink[i] = 2; continue; }                // clearly red
+    const l = lumA[i];
+    if (l < p90 * .8 && l < localMean(i % W, (i / W) | 0) * .74) ink[i] = redness > 22 ? 2 : 1; // clearly darker than its surroundings
   }
+  // Card-edge direction field. Overlapping card edges are long parallel lines along each card's
+  // up/down axis; their orientation tells which way a rank→suit pair must point. Structure tensor of
+  // the brightness gradient per cell, skipping ink, glyph halos and the card/mat border.
+  const near = new Uint8Array(N);   // ink dilated by 2 px, plus very dark (mat) pixels
+  for (let i = 0; i < N; i++) if (ink[i] || lumA[i] < p90 * .5) near[i] = 1;
+  for (let pass = 0; pass < 4; pass++) {
+    const src2 = near.slice();
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) { const k = y * W + x; if (!src2[k] && (src2[k - 1] || src2[k + 1] || src2[k - W] || src2[k + W])) near[k] = 1; }
+  }
+  const CELL = Math.max(12, RAD), CW = Math.ceil(W / CELL), CH = Math.ceil(H / CELL);
+  const Jxx = new Float64Array(CW * CH), Jyy = new Float64Array(CW * CH), Jxy = new Float64Array(CW * CH);
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+    const k = y * W + x; if (near[k]) continue;
+    const gx = lumA[k + 1 - W] + 2 * lumA[k + 1] + lumA[k + 1 + W] - lumA[k - 1 - W] - 2 * lumA[k - 1] - lumA[k - 1 + W];
+    const gy = lumA[k + W - 1] + 2 * lumA[k + W] + lumA[k + W + 1] - lumA[k - W - 1] - 2 * lumA[k - W] - lumA[k - W + 1];
+    const c = ((y / CELL) | 0) * CW + ((x / CELL) | 0);
+    Jxx[c] += gx * gx; Jyy[c] += gy * gy; Jxy[c] += gx * gy;
+  }
+  // edge axis (mod π) and coherence at a point, pooled over the 3×3 cells around it
+  const edgeAxis = (x, y) => {
+    const cx = (x / CELL) | 0, cy = (y / CELL) | 0; let a = 0, b = 0, cc = 0;
+    for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) { const X = cx + i, Y = cy + j; if (X < 0 || Y < 0 || X >= CW || Y >= CH) continue; const q = Y * CW + X; a += Jxx[q]; b += Jyy[q]; cc += Jxy[q]; }
+    const tr = a + b; if (tr <= 0) return null;
+    return { axis: .5 * Math.atan2(2 * cc, a - b) + Math.PI / 2, coh: Math.sqrt((a - b) ** 2 + 4 * cc * cc) / tr };
+  };
   // integral image of white
   const I = new Uint32Array((W + 1) * (H + 1));
   for (let y = 0; y < H; y++) { let row = 0; for (let x = 0; x < W; x++) { row += white[y * W + x]; I[(y + 1) * (W + 1) + x + 1] = I[y * (W + 1) + x + 1] + row; } }
@@ -186,48 +222,74 @@ function analyze(srcCanvas, maxSide){
   // pair a rank glyph with the suit pip "below" it in the card's own frame (any tilt up to ±75°)
   const pairs = [];
   for (const R of glyphs) for (const S of glyphs) {
-    if (S === R || S.col !== R.col) continue;
+    const TA = window.__traceAt, TR = TA && Math.hypot(R.cx - TA[0] * s, R.cy - TA[1] * s) < TA[2] * s && Math.hypot(S.cx - TA[3] * s, S.cy - TA[4] * s) < TA[2] * s; const TRL = TR ? (window.__trace ||= []) : null; if (TR) TRL.push("R" + Math.round(R.cx / s) + "," + Math.round(R.cy / s));
+    if (S === R || S.col !== R.col) { if (TR) TRL.push(1); continue; }
     const dx = S.cx - R.cx, dy = S.cy - R.cy, dist = Math.hypot(dx, dy);
     const big = Math.max(R.w, R.h, S.w, S.h);
-    if (dist > big * 2 || dist < big * .35) continue;
-    if (S.area < R.area * .25 || S.area > R.area * 3.5) continue;
-    const theta = Math.atan2(dy, dx);                 // direction rank -> suit = card "down" (any angle)
-    const phi = Math.PI / 2 - theta;
-    const fR = frame([R], phi, R.cx, R.cy), fS = frame([S], phi, R.cx, R.cy);
+    if (dist > big * 2 || dist < big * .35) { if (TR) TRL.push(2); continue; }
+    if (S.area < R.area * .25 || S.area > R.area * 3.5) { if (TR) TRL.push(3); continue; }
+    let theta = Math.atan2(dy, dx);                   // direction rank -> suit = card "down" (any angle)
+    let phi = Math.PI / 2 - theta;
+    const fR = frame([R], phi, R.cx, R.cy); let fS = frame([S], phi, R.cx, R.cy);
     const hR = fR.h, gap = fS.v0 - fR.v1;
-    if (gap < -hR * .15 || gap > hR * .95) continue;
-    if (fS.h < hR * .4 || fS.h > hR * 1.3) continue;
-    // "10": a partner glyph beside the rank, same line, similar height (checked BEFORE alignment,
-    // because the suit pip is centred under the whole "10", not under the "0" alone)
+    if (gap < -hR * .15 || gap > hR * .95) { if (TR) TRL.push(4); continue; }
+    if (fS.h < hR * .4 || fS.h > hR * 1.3) { if (TR) TRL.push(5); continue; }
+    // "10": a partner glyph beside the rank, same line, similar height. The pip sits under the whole
+    // "10", so the direction from the "1" or "0" alone is skewed → loose tolerances here, then the
+    // direction is recomputed from the merged "10" before the alignment and card-edge checks.
     let parts = [R], fRk = fR;
+    // look for the partner in the TRUE card frame (from the card-edge field) when it's available
+    const eaP = edgeAxis(S.cx + Math.cos(theta) * hR * 1.5, S.cy + Math.sin(theta) * hR * 1.5);
+    let phiP = phi;
+    if (eaP && eaP.coh > .3) { let ax = eaP.axis; if (Math.cos(ax - theta) < 0) ax += Math.PI; phiP = Math.PI / 2 - ax; }
+    const fRP = frame([R], phiP, R.cx, R.cy);
     for (const P of glyphs) {
-      if (P === R || P === S || P.col !== R.col || Math.hypot(P.cx - R.cx, P.cy - R.cy) > hR * 1.6) continue;
-      const fP = frame([P], phi, R.cx, R.cy);
-      if (Math.abs(fP.v0 - fR.v0) > hR * .22 || Math.abs(fP.h - hR) > hR * .25) continue;
-      const gapU = fP.u0 > fR.u1 ? fP.u0 - fR.u1 : fR.u0 - fP.u1;
-      if (gapU < -hR * .05 || gapU > hR * .45) continue;
-      if (Math.min(fP.w, fR.w) > hR * .55) continue;  // one of them must be a narrow "1"
-      const fM = frame([R, P], phi, R.cx, R.cy);
-      if (Math.abs((fS.u0 + fS.u1) / 2 - (fM.u0 + fM.u1) / 2) > Math.max(fM.w, fS.w) * .6) continue;
-      parts = [R, P]; fRk = fM; break;
+      if (P === R || P === S || P.col !== R.col || Math.hypot(P.cx - R.cx, P.cy - R.cy) > hR * 1.6) { if (TR) TRL.push(6); continue; }
+      const fP = frame([P], phiP, R.cx, R.cy), hP = fRP.h;
+      if (Math.abs(fP.v0 - fRP.v0) > hP * .3 || Math.abs(fP.h - hP) > hP * .3) { if (TR) TRL.push(7); continue; }
+      const gapU = fP.u0 > fRP.u1 ? fP.u0 - fRP.u1 : fRP.u0 - fP.u1;
+      if (gapU < -hP * .08 || gapU > hP * .45) { if (TR) TRL.push(8); continue; }
+      if (Math.min(fP.w, fRP.w) > hP * .55) { if (TR) TRL.push(9); continue; }  // one of them must be a narrow "1"
+      const A = R.area + P.area, mcx = (R.cx * R.area + P.cx * P.area) / A, mcy = (R.cy * R.area + P.cy * P.area) / A;
+      const th2 = Math.atan2(S.cy - mcy, S.cx - mcx), ph2 = Math.PI / 2 - th2;
+      const fM = frame([R, P], ph2, mcx, mcy), fS2 = frame([S], ph2, mcx, mcy);
+      if (Math.abs(fM.v0 - frame([P], ph2, mcx, mcy).v0) > hR * .22) { if (TR) TRL.push(10); continue; }   // "1" and "0" level in the true frame
+      if (Math.abs((fS2.u0 + fS2.u1) / 2 - (fM.u0 + fM.u1) / 2) > Math.max(fM.w, fS2.w) * .6) { if (TR) TRL.push(11); continue; }
+      parts = [R, P]; fRk = fM; fS = fS2; theta = th2; phi = ph2; break;
     }
-    if (Math.abs((fS.u0 + fS.u1) / 2 - (fRk.u0 + fRk.u1) / 2) > Math.max(fRk.w, fS.w) * .6) continue;
+    if (Math.abs((fS.u0 + fS.u1) / 2 - (fRk.u0 + fRk.u1) / 2) > Math.max(fRk.w, fS.w) * .6) { if (TR) TRL.push(12); continue; }
+    // must run along the local card edges (else it's a rank paired with a NEIGHBOUR's pip);
+    // sampled further down the card face, away from the card's top border with the mat
+    const ea = edgeAxis(S.cx + Math.cos(theta) * hR * 1.5, S.cy + Math.sin(theta) * hR * 1.5);
+    const edgeOK = !!(ea && ea.coh > .3);   // geometry confirmed by the card edges
+    if (ea && ea.coh > .3 && !window.__noEdgeGate) {
+      let diff = Math.abs(((theta - ea.axis) % Math.PI + Math.PI) % Math.PI); diff = Math.min(diff, Math.PI - diff);
+      if (diff > 22 * Math.PI / 180) { if (TR) TRL.push(13); continue; }
+    }
     const ten = parts.length === 2;
     let rs = bestOf(TEMPLATES.ranks, "r", frameGrid(fRk), fRk.w / fRk.h);
     rs = ten ? rs.filter(([r]) => r === "10") : rs.filter(([r]) => r !== "10" || fRk.w / fRk.h > .75);
     const sgrid = frameGrid(fS), ss = suitByShape(sgrid, R.col === 2);
-    if (!rs.length || !ss.length) continue;
+    if (!rs.length || !ss.length) { if (TR) TRL.push(14); continue; }
     const rScore = rs[0][1], sScore = ss[0][1];
-    if (rScore < .33 || sScore < .33) continue;
+    // a weak shape match is OK when the card edges confirm the geometry: OCR reads the rank later
+    // (this is what keeps a "10" whose "1" and "0" didn't merge, or a pale/blurred digit)
+    if (rScore < (edgeOK ? .2 : .33) || sScore < .33) { if (TR) TRL.push(15); continue; }
     pairs.push({ R, S, parts, rs, ss, sgrid, phi, hR: fRk.h, wR: fRk.w, score: rScore * sScore,
       cx: (R.cx + S.cx) / 2, cy: (R.cy + S.cy) / 2 });
   }
   // local direction vote BEFORE choosing: real indices nearby all point the same way, while accidental
   // pairs (sideways neighbours, pip-above-rank) point in random directions and cancel out.
   const dvec = p => [Math.sin(p.phi), Math.cos(p.phi)];
-  const voted = pairs.filter(p => {
+  // Reversed pairs (a pip taken as "rank", the digit below it as "suit") run along the card edges too,
+  // but point the opposite way and would cancel real indices in the vote. All cards of one spread point
+  // roughly the same way overall, so first drop pairs pointing against the spread's overall "down".
+  let gx0 = 0, gy0 = 0; for (const p of pairs) { const [a, b] = dvec(p); gx0 += a * p.score; gy0 += b * p.score; }
+  const gm = Math.hypot(gx0, gy0) || 1;
+  const fwd = pairs.filter(p => { const [a, b] = dvec(p); return (a * gx0 + b * gy0) / gm > -.2; });
+  const voted = fwd.filter(p => {
     const [a0, b0] = dvec(p); let sx = 0, sy = 0;
-    for (const q of pairs) { if (Math.hypot(q.cx - p.cx, q.cy - p.cy) > p.hR * 10) continue; const [a, b] = dvec(q); sx += a * q.score; sy += b * q.score; }
+    for (const q of fwd) { if (Math.hypot(q.cx - p.cx, q.cy - p.cy) > p.hR * 10) continue; const [a, b] = dvec(q); sx += a * q.score; sy += b * q.score; }
     const m = Math.hypot(sx, sy) || 1;
     return (a0 * sx + b0 * sy) / m > Math.cos(45 * Math.PI / 180);
   });
@@ -242,6 +304,8 @@ function analyze(srcCanvas, maxSide){
   if (window.__csrDebug) Object.assign(debug, { s, W, H, whiteT, blackT,
     sized: comps.filter(o => { const b = Math.max(o.w, o.h); return b >= minH && b <= maxH; }).map(o => [o.x0, o.y0, o.w, o.h, o.col, glyphs.includes(o) ? 1 : 0]),
     pr: chosen.map(p => [p.R.cx, p.R.cy, p.S.cx, p.S.cy, p.rs[0][0] + p.ss[0][0], +p.score.toFixed(2)]),
+    prAll: pairs.map(p => [p.R.cx, p.R.cy, p.S.cx, p.S.cy, voted.includes(p) ? 1 : 0, fwd.includes(p) ? 1 : 0, p.parts.length, +p.score.toFixed(2), Math.round(90 - p.phi * 180 / Math.PI), p.rs[0][0] + p.ss[0][0], chosen.includes(p) ? 1 : 0]),
+    field: (() => { const f = []; for (let y = CELL / 2; y < H; y += CELL) for (let x = CELL / 2; x < W; x += CELL) { const e = edgeAxis(x, y); if (e) f.push([x, y, e.axis, e.coh]); } return f; })(),
     grids: chosen.map(p => { const fR = frame(p.parts, p.phi, p.R.cx, p.R.cy), fS = frame([p.S], p.phi, p.R.cx, p.R.cy);
       return { r: Array.from(frameGrid(fR)), s: Array.from(frameGrid(fS)), lab: p.rs[0][0] + p.ss[0][0], rs: p.rs.slice(0, 3), ss: p.ss.slice(0, 2), ph: p.phi, x: p.cx }; }) });
   if (!chosen.length) return { source: "device", cards: [], band: null, track: [], scale: s, debug };
@@ -279,6 +343,22 @@ function analyze(srcCanvas, maxSide){
   const rx = idx.reduce((a, p) => a + Math.cos(p.phi), 0), ry = idx.reduce((a, p) => a - Math.sin(p.phi), 0); // card "right" = (cos φ, -sin φ)
   if (ax * rx + ay * ry < 0) { ax = -ax; ay = -ay; }
   for (const p of idx) { const dx = p.cx - mx0, dy = p.cy - my0; p.t = dx * ax + dy * ay; p.n = -dx * ay + dy * ax; }
+  // Strong arcs fold back over a straight axis, so order by angle around a fitted circle instead
+  // (Kåsa least-squares fit). Straight spreads give a huge radius → keep the straight-axis order.
+  const circ = fitCircle(idx.map(p => [p.cx, p.cy]));
+  const extent = Math.max(...idx.map(p => p.t)) - Math.min(...idx.map(p => p.t));
+  if (circ && circ.r < extent * 3 && idx.length >= 6) {
+    const a0 = Math.atan2(my0 - circ.cy, mx0 - circ.cx);
+    let tsum = 0;
+    for (const p of idx) {
+      const a = Math.atan2(p.cy - circ.cy, p.cx - circ.cx), rel = Math.atan2(Math.sin(a - a0), Math.cos(a - a0));
+      p.t2 = rel * circ.r; p.n2 = Math.hypot(p.cx - circ.cx, p.cy - circ.cy) - circ.r;
+      tsum += (-Math.sin(a)) * Math.cos(p.phi) + Math.cos(a) * -Math.sin(p.phi); // tangent · card "right"
+    }
+    const sgn = tsum < 0 ? -1 : 1;
+    for (const p of idx) { p.t = p.t2 * sgn; p.n = p.n2; }
+    debug.order = `circle r=${Math.round(circ.r)}`;
+  } else debug.order = "axis";
   idx.sort((a, b) => a.t - b.t);
   // local line fit through neighbours (in the spread's own frame): indices follow a smooth curve
   idx = idx.filter((p, i) => {
@@ -312,6 +392,7 @@ function analyze(srcCanvas, maxSide){
       why: `template ${Math.round(top.sc * 100)}%` + (Math.abs(p.phi) > .17 ? ` · tilt ${Math.round(-p.phi * 180 / Math.PI)}°` : ""),
       box: [x0 * inv, y0 * inv, (x1 - x0 + 1) * inv, (y1 - y0 + 1) * inv], x: p.cx / W, y: p.cy / H,
       _suitConf: p.ss[0][1], _phi: p.phi,
+      suitConf: p.ss[0][1], rankConf: Math.min(.9, p.rs[0][1] * 1.2 * (.5 + (p.rs[0][1] - (p.rs[1] ? p.rs[1][1] : 0)) / p.rs[0][1])),
       _rank: { cx: rcx * inv, cy: rcy * inv, phi: p.phi, w: p.wR * inv, h: p.hR * inv }
     };
   });
@@ -333,14 +414,14 @@ function analyze(srcCanvas, maxSide){
         const x = Math.round(ax + tx * s + dx * off * hm), y = Math.round(ay + ty * s + dy * off * hm);
         if (x < 1 || y < 1 || x >= W - 1 || y >= H - 1) continue;
         const k = y * W + x, q = k * 4, lum = (d[q] + d[q + 1] + d[q + 2]) / 3;
-        const bad = ink[k] === 2 || ink[k - 1] === 2 || ink[k + 1] === 2 || lum < p90v * .55 || !white[k] && lum < p90v * .7; // pips/ink/background
+        const bad = near[k] || lum < p90v * .55 || !white[k] && lum < p90v * .7; // pips/ink + their halos, background
         if (bad) continue;
         sum += lum; n++;
       }
       prof.push(n >= 5 ? sum / n : null);
     }
     const valid = prof.filter(v => v != null).length;
-    if (valid < prof.length * .5 || valid < 6) return -1;
+    if (valid < prof.length * .35 || valid < 6) return -1;
     const win = Math.max(3, Math.round(hm * .5)); let edges = 0, last = -1e9;
     for (let j = 1; j < prof.length - 1; j++) {
       const v = prof[j]; if (v == null) continue;
@@ -362,7 +443,8 @@ function analyze(srcCanvas, maxSide){
         // spacing alone is not proof: the bottom card's strip is often much wider than the rest.
         // Only add hidden cards for card edges actually seen in the gap (one per edge).
         const edges = edgesBetween(cards[i], cards[i + 1]);
-        const n = edges < 0 ? Math.round(gaps[i] / mg) - 1 : Math.min(edges, Math.round(gaps[i] / mg));
+        // undecided scan: a truly missing card leaves a ~2× gap, so don't invent one for a 1.6–1.8× gap
+        const n = edges < 0 ? (gaps[i] / mg >= 1.85 ? Math.round(gaps[i] / mg) - 1 : 0) : Math.min(edges, Math.round(gaps[i] / mg));
         (debug.gaps ||= []).push(`${i + 1}|${i + 2}: x${(gaps[i] / mg).toFixed(1)} edges ${edges} → ${n}`);
         for (let k = 1; k <= n; k++) {
           const t = k / (n + 1), x = pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, y = pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t;
@@ -379,6 +461,22 @@ function analyze(srcCanvas, maxSide){
     x1: Math.max(...cards.map(c => c.box[0] + c.box[2])) + hm * 2 * inv, y1: Math.max(...cards.map(c => c.box[1] + c.box[3])) + hm * 2 * inv, h: hm * inv };
   const track = cards.map(c => [c.x, c.y]);
   return { source: "device", cards: full, band, track, scale: s, debug };
+}
+/* least-squares circle through points (Kåsa): solve x²+y² + Dx + Ey + F = 0 */
+function fitCircle(pts){
+  if (pts.length < 3) return null;
+  let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, sz = 0; const n = pts.length;
+  const mx = pts.reduce((a, p) => a + p[0], 0) / n, my = pts.reduce((a, p) => a + p[1], 0) / n;   // centre for numerical stability
+  for (const [X, Y] of pts) { const x = X - mx, y = Y - my, z = x * x + y * y;
+    sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; sxz += x * z; syz += y * z; sz += z; }
+  // normal equations for [D, E, F]
+  const A = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]], B = [-sxz, -syz, -sz];
+  const det = m => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+  const dA = det(A); if (Math.abs(dA) < 1e-9) return null;
+  const col = (k) => A.map((row, i) => row.map((v, j) => j === k ? B[i] : v));
+  const D = det(col(0)) / dA, E = det(col(1)) / dA, F = det(col(2)) / dA;
+  const cx = -D / 2, cy = -E / 2, r2 = cx * cx + cy * cy - F;
+  return r2 > 0 ? { cx: cx + mx, cy: cy + my, r: Math.sqrt(r2) } : null;
 }
 function sampleColor(ink, W, H, x0, y0, w, h){
   let r = 0, b = 0;
@@ -489,8 +587,8 @@ async function ocrPass(res, canvas = src){
       if (t === "1" || t === "0" || t === "I0" || t === "L0" || t === "100") t = "10";
       if (!RANKS.includes(t)) return;
       const cf = Math.min(1, reads[i].cf / 100), sc = c._suitConf || .7;
-      if (t === c.rank) { c.conf = Math.min(.98, .5 + .5 * Math.max(cf, .8)) * (.6 + .4 * sc); c.why += " · OCR agrees"; }
-      else if (cf > .55) { c.alts = [c.rank + c.suit, ...c.alts]; c.rank = t; c.conf = (.45 + .45 * cf) * (.6 + .4 * sc); c.why += ` · OCR says ${t}`; }
+      if (t === c.rank) { c.conf = Math.min(.98, .5 + .5 * Math.max(cf, .8)) * (.6 + .4 * sc); c.rankConf = Math.max(c.rankConf || 0, .9 + .08 * cf); c.why += " · OCR agrees"; }
+      else if (cf > .55) { c.alts = [c.rank + c.suit, ...c.alts]; c.rank = t; c.conf = (.45 + .45 * cf) * (.6 + .4 * sc); c.rankConf = .5 + .4 * cf; c.why += ` · OCR says ${t}`; }
       else return;
       c.altList = [c.rank + c.suit, ...c.alts.filter(a => a !== c.rank + c.suit)];
       c.label = labelOf(c.conf);
@@ -513,7 +611,10 @@ function resolveDuplicates(cards){
       // (a much weaker claim can be overridden; that card is then re-resolved on the next pass)
       const free = a => a !== k && !seen.has(a) && !cards.some(o => o !== c && o.rank + o.suit === a && o.conf >= c.conf * .6);
       const alt = [sister, ...(c.altList || c.alts || [])].find(free);
-      if (alt) { c.why = `duplicate of pos ${seen.get(k).pos}, next best`; c.rank = alt.slice(0, -1); c.suit = alt.slice(-1); c.conf *= .7; c.label = labelOf(c.conf); }
+      if (alt) { c.why = `duplicate of pos ${seen.get(k).pos}, next best`;
+        if (alt.slice(0, -1) !== c.rank) c.rankConf = (c.rankConf ?? .5) * .6;
+        if (alt.slice(-1) !== c.suit) c.suitConf = Math.min(c.suitConf ?? .5, .55);
+        c.rank = alt.slice(0, -1); c.suit = alt.slice(-1); c.conf *= .7; c.label = labelOf(c.conf); }
       else { c.why = `duplicate of pos ${seen.get(k).pos}`; c.color ||= RED.has(c.suit) ? "red" : "black"; c.rank = "?"; c.suit = "?"; c.conf = 0; c.label = "unknown"; }
       changed = true;
     }
@@ -536,7 +637,7 @@ function eliminate(cards){
       const onlyWhenFull = deckN === 52 && cards.length === 52;
       if (cand.length === 1 && (onlyWhenFull || c.rank !== "?" || c.suit !== "?")) {
         c.rank = cand[0].slice(0, -1); c.suit = cand[0].slice(-1); c.label = "deduced"; c.conf = .5; c.src = "elimination";
-        c.why = "only card left that fits"; c.alts = []; progress = true;
+        c.why = "only card left that fits"; c.alts = []; c.rankConf = c.suitConf = .5; progress = true;
       } else c.why = (c.why ? c.why.split(" · ")[0] + " · " : "") + `${cand.length} candidates`;
     }
     if (!progress) break;
@@ -545,6 +646,8 @@ function eliminate(cards){
 
 
 export { RANKS, SUITS, SUIT_SYM, RED, FULL_DECK };
+// calibrated on test-photos/: correct suits score ≥ 0.80 90% of the time, wrong ones often ~0.55
+export const SUIT_SURE = 0.7, RANK_SURE = 0.6;
 
 /** Load OCR + templates ahead of time so the first photo is fast. */
 export async function warmUp(onStatus){
@@ -569,9 +672,19 @@ export async function readSpread(canvas, { leftmost = 4, ocr = true, deckSize = 
   if (ocr && res.cards.length) await ocrPass(res, canvas);
   resolveDuplicates(res.cards);
   eliminate(res.cards);
-  const strip = c => ({ pos: c.pos, rank: c.rank, suit: c.suit, label: c.label, conf: c.conf,
-    card: c.rank === "?" || c.suit === "?" ? "?" : c.rank + SUIT_SYM[c.suit], color: c.color || (RED.has(c.suit) ? "red" : "black"),
-    alts: (c.alts || []).slice(0, 6), why: c.why, box: c.box });
+  // value: A=1 … 10, J=11, Q=12, K=13. rankSure / suitSure tell what can be trusted on its own:
+  // when the suit is shaky the rank/value is often still right (and better than nothing).
+  const VALUE = { A: 1, J: 11, Q: 12, K: 13 };
+  const strip = c => {
+    const rankSure = c.rank !== "?" && (c.rankConf ?? c.conf ?? 0) >= RANK_SURE;
+    const suitSure = c.suit !== "?" && (c.suitConf ?? c.conf ?? 0) >= SUIT_SURE;
+    return { pos: c.pos, rank: c.rank, suit: c.suit, label: c.label, conf: c.conf,
+      value: c.rank === "?" ? null : (VALUE[c.rank] || +c.rank),
+      rankConf: c.rankConf ?? null, suitConf: c.suitConf ?? null, rankSure, suitSure,
+      card: c.rank === "?" || c.suit === "?" ? "?" : c.rank + SUIT_SYM[c.suit],
+      color: c.color || (RED.has(c.suit) ? "red" : c.suit === "?" ? null : "black"),
+      alts: (c.alts || []).slice(0, 6), why: c.why, box: c.box };
+  };
   const cards = res.cards.map(strip);
   return { cards, leftmost: cards.filter(c => c.pos <= leftmost), ms: Math.round(performance.now() - t0) };
 }
