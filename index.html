@@ -214,27 +214,38 @@ async function shoot(fromCanvas){
 }
 
 /* ---------- the trick ----------
-   X = 52 − (sum of the values of the four leftmost cards), A=1 … J=11, Q=12, K=13. Suits don't matter.
-   Only when all four ranks are read confidently; otherwise null → "retake" tell. */
+   X = 52 − (sum of the values of the n leftmost cards), A=1 … J=11, Q=12, K=13. Suits don't matter.
+   n = 4 normally. Their pile k must satisfy n ≤ k ≤ X, so when four cards give X < 12 (high cards),
+   use n = 3 (three piles): X is then always ≥ 13. Also n = 3 when only the 4th card is unreadable.
+   Returns { X, n } or null → "retake" tell. */
+const MIN_X4 = 12;
 function trickNumber(r){
-  const four = [1, 2, 3, 4].map(i => r.leftmost.find(c => c.pos === i));
-  if (four.some(c => !c || c.rank === "?" || !c.rankSure || !c.value)) return null;
-  return 52 - four.reduce((s, c) => s + c.value, 0);
+  const card = i => r.leftmost.find(c => c.pos === i);
+  const ok = c => c && c.rank !== "?" && c.rankSure && c.value;
+  const firstN = n => [1, 2, 3, 4].slice(0, n).map(card);
+  const three = firstN(3), four = firstN(4);
+  if (!three.every(ok)) return null;
+  const X3 = 52 - three.reduce((s, c) => s + c.value, 0);
+  if (four.every(ok)) {
+    const X4 = X3 - four[3].value;
+    if (X4 >= MIN_X4) return { X: X4, n: 4 };
+  }
+  return { X: X3, n: 3 };
 }
-/* Disguise: a Pixel-style "Saved" toast. Real Pixel names are PXL_YYYYMMDD_HHMMSSmmm.jpg; the last two
-   "millisecond" digits carry X. Retake tell: the motion-photo suffix ".MP.jpg" (a real Pixel name). */
-function pixelName(X){
+/* Disguise: a Pixel-style "Saved" toast. Real Pixel names are PXL_YYYYMMDD_HHMMSSmmm.jpg; the three
+   "millisecond" digits carry the answer: first = number of piles (3 or 4), last two = X.
+   Retake tell: the motion-photo suffix ".MP.jpg" (a real Pixel name) with random digits. */
+function pixelName(t){
   const d = new Date(), p = (n, w = 2) => String(n).padStart(w, "0");
   const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-  const lead = Math.floor(Math.random() * 10);
-  return X == null
-    ? `PXL_${stamp}${lead}${p(Math.floor(Math.random() * 100))}.MP.jpg`
-    : `PXL_${stamp}${lead}${p(X)}.jpg`;
+  return t == null
+    ? `PXL_${stamp}${p(Math.floor(Math.random() * 1000), 3)}.MP.jpg`
+    : `PXL_${stamp}${t.n}${p(t.X)}.jpg`;
 }
 let toastTimer = null;
-function showSaved(X){
+function showSaved(t0){
   const t = $("toast");
-  t.textContent = `Saved ${pixelName(X)}`;
+  t.textContent = `Saved ${pixelName(t0)}`;
   t.classList.add("show");
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 3200);
 }
@@ -278,7 +289,7 @@ function showResult(r){
     }
     box.appendChild(el);
   }
-  $("sheetTitle").textContent = r.X == null ? "Leftmost 4 — retake (.MP)" : `Leftmost 4 — X = ${r.X}`;
+  $("sheetTitle").textContent = r.X == null ? "Leftmost 4 — retake (.MP)" : `${r.X.n} piles · X = ${r.X.X}`;
   $("meta").textContent = `values ${values.join(" · ")}  ·  ${r.cards.length} cards found · ${r.size || ""} · ${(r.ms / 1000).toFixed(1)} s · tap to close`;
   $("sheet").classList.add("open");
 }
@@ -329,7 +340,7 @@ keepAwake();
 warmUp();   // fetch OCR in the background so the first shot is quick
 
 // test hook for automated checks
-window.__cam = { shoot, get lastResult(){ return lastResult; } };
+window.__cam = { shoot, trickNumber, pixelName, get lastResult(){ return lastResult; } };
 </script>
 </body>
 </html>
