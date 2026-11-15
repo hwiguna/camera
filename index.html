@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<title>Camera</title>
+<style>
+:root{
+  --bg:#000; --fg:#fff; --dim:rgba(255,255,255,.72); --chip:rgba(32,33,36,.55); --chip-on:rgba(255,255,255,.92);
+  --accent:#fde293; --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hidden;
+  font-family:"Google Sans",Roboto,system-ui,-apple-system,"Segoe UI",sans-serif;touch-action:manipulation}
+#app{position:fixed;inset:0;display:flex;flex-direction:column}
+
+/* viewfinder */
+#vf{position:relative;flex:1;overflow:hidden;background:#000}
+#vf video,#vf img.feed{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#flash{position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;transition:opacity .12s}
+#flash.on{opacity:1;transition:none}
+.focus-ring{position:absolute;width:72px;height:72px;margin:-36px 0 0 -36px;border:2px solid #fff;border-radius:50%;
+  pointer-events:none;animation:focus .7s ease-out forwards}
+@keyframes focus{0%{transform:scale(1.5);opacity:0}25%{opacity:1}60%{transform:scale(1)}100%{transform:scale(1);opacity:0}}
+#msg{position:absolute;left:50%;top:45%;transform:translate(-50%,-50%);max-width:80%;text-align:center;
+  font-size:15px;color:var(--dim);line-height:1.4;display:none}
+
+/* top bar */
+#top{position:absolute;top:0;left:0;right:0;padding:calc(var(--safe-t) + 10px) 14px 10px;display:flex;align-items:center;
+  justify-content:space-between;background:linear-gradient(rgba(0,0,0,.45),transparent);z-index:2}
+.tb{display:flex;gap:6px;align-items:center}
+.icon{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:transparent;border:0;color:#fff;padding:0}
+.icon svg{width:24px;height:24px;fill:currentColor}
+.pill{height:36px;padding:0 10px 0 12px;border-radius:18px;background:var(--chip);display:flex;align-items:center;gap:2px;border:0;color:#fff}
+.pill svg{width:22px;height:22px;fill:#fff}
+
+/* zoom chips */
+#zoom{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);display:flex;gap:10px;padding:4px;border-radius:22px;
+  background:rgba(32,33,36,.35);z-index:2}
+#zoom button{width:36px;height:36px;border-radius:50%;border:0;background:var(--chip);color:#fff;font:600 12px/1 inherit}
+#zoom button.on{background:var(--chip-on);color:#000;width:40px;height:40px;margin:-2px 0;font-size:13px}
+
+/* bottom controls */
+#bottom{flex:0 0 auto;background:#000;padding:10px 0 calc(var(--safe-b) + 22px)}
+#modes{display:flex;justify-content:center;gap:18px;font-size:14px;color:var(--dim);margin:2px 0 18px;white-space:nowrap;overflow:hidden}
+#modes span{padding:6px 12px;border-radius:16px}
+#modes span.on{background:#3c4043;color:#fff;font-weight:500}
+#row{display:flex;align-items:center;justify-content:space-between;padding:0 34px}
+#thumb{width:52px;height:52px;border-radius:50%;border:2px solid rgba(255,255,255,.85);background:#202124 center/cover no-repeat;position:relative;padding:0}
+#thumb.busy::after{content:"";position:absolute;inset:-6px;border-radius:50%;border:3px solid transparent;border-top-color:#fff;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#shutter{width:78px;height:78px;border-radius:50%;border:4px solid rgba(255,255,255,.9);background:transparent;padding:4px;display:grid;place-items:center}
+#shutter i{display:block;width:100%;height:100%;border-radius:50%;background:#fff;transition:transform .1s}
+#shutter:active i,#shutter.press i{transform:scale(.86)}
+#shutter:disabled{opacity:.6}
+#flip{width:52px;height:52px;border-radius:50%;border:0;background:#3c4043;color:#fff;display:grid;place-items:center;padding:0}
+#flip svg{width:28px;height:28px;fill:#fff;transition:transform .4s}
+
+/* result sheet (temporary: shows the leftmost 4 cards) */
+#sheet{position:fixed;left:0;right:0;bottom:0;z-index:10;background:rgba(18,18,18,.97);border-radius:22px 22px 0 0;
+  padding:14px 16px calc(var(--safe-b) + 22px);transform:translateY(105%);transition:transform .25s ease}
+#sheet.open{transform:none}
+#sheet .grab{width:36px;height:4px;border-radius:2px;background:#5f6368;margin:0 auto 12px}
+#sheet h2{margin:0 0 12px;font:500 15px/1.3 inherit;color:var(--dim);text-align:center}
+#cards{display:flex;gap:10px;justify-content:center}
+.pc{flex:0 1 78px;aspect-ratio:5/7;border-radius:9px;background:#fbfaf5;color:#111;position:relative;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.5)}
+.pc.red{color:#c8202a}
+.pc .r{font:700 26px/1 Georgia,"Times New Roman",serif}
+.pc .s{font-size:28px;line-height:1.1}
+.pc .n{position:absolute;top:5px;left:7px;font:600 11px/1 inherit;color:#888}
+.pc.unsure::after{content:"?";position:absolute;top:4px;right:6px;font:700 13px/1 inherit;color:#e37400}
+.pc.unknown{background:#3c4043;color:#9aa0a6}
+#sheet .meta{margin-top:12px;text-align:center;font-size:12px;color:#9aa0a6}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="vf">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="msg"></div>
+    <div id="flash"></div>
+
+    <div id="top">
+      <button class="pill" aria-label="Settings">
+        <svg viewBox="0 0 24 24"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.7 1.7 1L11 21h4l.4-2.9c.6-.3 1.2-.6 1.7-1l2.5 1 2-3.5L19.4 13zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" transform="translate(-1 0)"/></svg>
+        <svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg>
+      </button>
+      <div class="tb">
+        <button class="icon" aria-label="Flash off"><svg viewBox="0 0 24 24"><path d="M3.3 2 2 3.3l5 5V13h3v9l3.6-6.1 4.1 4.1 1.3-1.3L3.3 2zM17 10h-4l4-8H7v2.2l8.5 8.5L17 10z"/></svg></button>
+        <button class="icon" aria-label="Timer off"><svg viewBox="0 0 24 24"><path d="M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8-6.6 1.4-1.4c-.4-.5-.9-1-1.4-1.4L17.6 6A9 9 0 1 0 19 7.4zM12 20a7 7 0 1 1 0-14 7 7 0 0 1 0 14z"/></svg></button>
+        <button class="icon" aria-label="Aspect ratio"><svg viewBox="0 0 24 24"><path d="M19 12h-2v3h-3v2h5v-5zM7 9h3V7H5v5h2V9zm14-6H3a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h18a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H3V5h18v14z"/></svg></button>
+        <button class="icon" aria-label="Motion photo"><svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm-2-12.5v9l6-4.5-6-4.5z"/></svg></button>
+      </div>
+    </div>
+
+    <div id="zoom" role="group" aria-label="Zoom">
+      <button>.5</button><button class="on">1x</button><button>2</button><button>5</button>
+    </div>
+  </div>
+
+  <div id="bottom">
+    <div id="modes"><span>Night Sight</span><span>Portrait</span><span class="on">Photo</span><span>Video</span><span>Modes</span></div>
+    <div id="row">
+      <button id="thumb" aria-label="Last photo"></button>
+      <button id="shutter" aria-label="Take photo" disabled><i></i></button>
+      <button id="flip" aria-label="Switch camera"><svg viewBox="0 0 24 24"><path d="M20 5h-3.2L15 3H9L7.2 5H4a2 2 0 0 0-2 2v12c0 1.1.9 2 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm-8 13a5 5 0 0 1-4.6-3H9.5a3 3 0 0 0 5.4-1H13l3-3 3 3h-2a5 5 0 0 1-5 4zm-4-6 3-3H9.1A3 3 0 0 1 14.5 11h2.1A5 5 0 0 0 7 11H5l3 3z"/></svg></button>
+    </div>
+  </div>
+</div>
+
+<div id="sheet" aria-live="polite">
+  <div class="grab"></div>
+  <h2 id="sheetTitle">Leftmost 4 cards</h2>
+  <div id="cards"></div>
+  <div class="meta" id="meta"></div>
+</div>
+
+<input type="file" id="pick" accept="image/*" hidden>
+
+<script type="module">
+import { readSpread, warmUp, SUIT_SYM } from "./card-engine.js";
+
+const $ = id => document.getElementById(id);
+const video = $("video"), vf = $("vf");
+const LEFTMOST = 4;
+let feed = null;          // "camera" | "image" | null
+let testImg = null, track = null, lastResult = null;
+
+/* ---------- camera ---------- */
+async function startCamera(){
+  const test = new URLSearchParams(location.search).get("test");   // dev: ?test=<image url> fakes the camera
+  if (test) {
+    testImg = new Image(); testImg.className = "feed"; testImg.src = test;
+    await testImg.decode(); video.replaceWith(testImg); feed = "image"; return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 4096 }, height: { ideal: 3072 } }
+    });
+    video.srcObject = stream; await video.play();
+    track = stream.getVideoTracks()[0]; feed = "camera";
+    try { await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }); } catch {}
+  } catch (e) {
+    console.warn(e);
+    feed = null;
+    $("msg").style.display = "block";
+    $("msg").textContent = location.protocol !== "https:" && location.hostname !== "localhost"
+      ? "Camera needs https (GitHub Pages is fine). Tap the shutter to choose a photo instead."
+      : "Camera unavailable. Tap the shutter to choose a photo instead.";
+  }
+}
+
+/* full-resolution still: ImageCapture.takePhoto() on Android Chrome, else the current video frame */
+async function grabStill(){
+  const MAX = 4000;
+  let bmp = null;
+  if (feed === "image") bmp = testImg;
+  else if (feed === "camera") {
+    if ("ImageCapture" in window && track) {
+      try {
+        const blob = await Promise.race([new ImageCapture(track).takePhoto(), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3500))]);
+        bmp = await createImageBitmap(blob, { imageOrientation: "from-image" });
+      } catch (e) { console.warn("takePhoto failed, using video frame", e); }
+    }
+    if (!bmp) bmp = video;
+  }
+  const w = bmp.videoWidth || bmp.naturalWidth || bmp.width, h = bmp.videoHeight || bmp.naturalHeight || bmp.height;
+  const s = Math.min(1, MAX / Math.max(w, h));
+  const c = document.createElement("canvas"); c.width = Math.round(w * s); c.height = Math.round(h * s);
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  return c;
+}
+
+/* ---------- shutter ---------- */
+let busy = false;
+async function shoot(fromCanvas){
+  if (busy) return; busy = true;
+  goFullscreen();
+  $("shutter").classList.add("press"); setTimeout(() => $("shutter").classList.remove("press"), 150);
+  $("flash").classList.add("on"); setTimeout(() => $("flash").classList.remove("on"), 90);
+  try {
+    const canvas = fromCanvas || await grabStill();
+    $("thumb").style.backgroundImage = `url(${thumbOf(canvas)})`;
+    $("thumb").classList.add("busy");
+    await new Promise(r => setTimeout(r, 30));            // let the UI paint before heavy work
+    lastResult = await readSpread(canvas, { leftmost: LEFTMOST });
+    showResult(lastResult);
+  } catch (e) {
+    console.error(e); lastResult = null; showError(e);
+  } finally { $("thumb").classList.remove("busy"); busy = false; }
+}
+function thumbOf(c){
+  const t = document.createElement("canvas"), k = 120 / Math.min(c.width, c.height);
+  t.width = Math.round(c.width * k); t.height = Math.round(c.height * k);
+  t.getContext("2d").drawImage(c, 0, 0, t.width, t.height); return t.toDataURL("image/jpeg", .7);
+}
+$("shutter").onclick = () => feed ? shoot() : $("pick").click();
+$("pick").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const bmp = await createImageBitmap(f, { imageOrientation: "from-image" });
+  const c = document.createElement("canvas"); const s = Math.min(1, 4000 / Math.max(bmp.width, bmp.height));
+  c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s); c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  e.target.value = ""; shoot(c);
+};
+
+/* ---------- result (temporary display) ---------- */
+function showResult(r){
+  const box = $("cards"); box.innerHTML = "";
+  for (let i = 1; i <= LEFTMOST; i++) {
+    const c = r.leftmost.find(x => x.pos === i);
+    const el = document.createElement("div");
+    if (!c || c.card === "?") { el.className = "pc unknown"; el.innerHTML = `<span class="n">${i}</span><span class="r">?</span>`; }
+    else {
+      el.className = "pc" + (c.color === "red" ? " red" : "") + (c.label === "high" ? "" : " unsure");
+      el.innerHTML = `<span class="n">${i}</span><span class="r">${c.rank}</span><span class="s">${SUIT_SYM[c.suit]}</span>`;
+      el.title = `${c.label}${c.alts.length ? " · or " + c.alts.slice(0, 3).join(", ") : ""}`;
+    }
+    box.appendChild(el);
+  }
+  $("sheetTitle").textContent = "Leftmost 4 cards";
+  $("meta").textContent = `${r.cards.length} cards found · ${(r.ms / 1000).toFixed(1)} s · tap to close`;
+  $("sheet").classList.add("open");
+}
+function showError(e){
+  $("cards").innerHTML = ""; $("sheetTitle").textContent = "Couldn't read the spread";
+  $("meta").textContent = String(e.message || e) + " · tap to close"; $("sheet").classList.add("open");
+}
+$("sheet").onclick = () => $("sheet").classList.remove("open");
+$("thumb").onclick = () => lastResult && showResult(lastResult);
+
+/* ---------- decorative controls (look & feel only) ---------- */
+vf.addEventListener("click", e => {
+  if (e.target.closest("button")) return;
+  const r = vf.getBoundingClientRect(), ring = document.createElement("div");
+  ring.className = "focus-ring"; ring.style.left = (e.clientX - r.left) + "px"; ring.style.top = (e.clientY - r.top) + "px";
+  vf.appendChild(ring); setTimeout(() => ring.remove(), 750); goFullscreen();
+});
+$("zoom").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  for (const x of $("zoom").children) {
+    const z = x.textContent.replace("x", "");
+    x.classList.toggle("on", x === b); x.textContent = x === b ? z + "x" : z;
+  }
+});
+let flipDeg = 0;
+$("flip").onclick = () => { flipDeg += 180; $("flip").querySelector("svg").style.transform = `rotate(${flipDeg}deg)`; };
+
+/* ---------- immersive mode ---------- */
+let fsTried = false;
+function goFullscreen(){
+  if (fsTried || document.fullscreenElement || !document.documentElement.requestFullscreen) return;
+  fsTried = true;
+  document.documentElement.requestFullscreen({ navigationUI: "hide" })
+    .then(() => screen.orientation && screen.orientation.lock && screen.orientation.lock("portrait").catch(() => {}))
+    .catch(() => {});
+}
+async function keepAwake(){ try { await navigator.wakeLock?.request("screen"); } catch {} }
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") keepAwake(); });
+
+/* ---------- boot ---------- */
+await startCamera();
+$("shutter").disabled = false;
+keepAwake();
+warmUp();   // fetch OCR in the background so the first shot is quick
+
+// test hook for automated checks
+window.__cam = { shoot, get lastResult(){ return lastResult; } };
+</script>
+</body>
+</html>
